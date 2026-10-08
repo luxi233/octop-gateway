@@ -267,6 +267,65 @@ class TestWechatAutoChannel:
         with pytest.raises(BridgeAPIError):
             await ch.fetch_remote_media("wca-media://room@chatroom/99")
 
+    def _mentioned_group_text(self) -> dict:
+        return _event(
+            chat_id="room@chatroom", chat_type="group",
+            at_usernames=[_SELF_WXID], text="@me 这个是什么", type="text",
+        )
+
+    async def test_preprocess_promotes_context_image_on_mention(self) -> None:
+        """@ mention in a group pulls the freshest context image onto the turn."""
+        ch = _make_channel()
+        ch._http = _FakeSession([_FakeResponse(200, {  # type: ignore[attr-defined]
+            "lines": ["a: hi"],
+            "media": [
+                {"path": r"C:\tmp\old.jpg", "type": "image"},
+                {"path": r"C:\tmp\new.jpg", "type": "image"},
+                {"path": r"C:\tmp\v.mp4", "type": "video"},
+            ],
+        })])
+        msg = ch.parse_inbound(self._mentioned_group_text())
+        await ch._preprocess_inbound(msg)
+        images = [p for p in msg.content if isinstance(p, ImageContent)]
+        assert len(images) == 2
+        # newest first
+        assert images[0].url == "file://C:\\tmp\\new.jpg"
+
+    async def test_preprocess_skips_unmentioned_group(self) -> None:
+        ch = _make_channel()
+        ch._http = _FakeSession([])  # type: ignore[attr-defined]
+        ev = _event(chat_id="room@chatroom", chat_type="group",
+                    at_usernames=["wxid_other"], text="hello")
+        msg = ch.parse_inbound(ev)
+        await ch._preprocess_inbound(msg)
+        assert not any(isinstance(p, ImageContent) for p in msg.content)
+
+    async def test_preprocess_skips_dm(self) -> None:
+        ch = _make_channel()
+        ch._http = _FakeSession([])  # type: ignore[attr-defined]
+        msg = ch.parse_inbound(_event(at_usernames=[_SELF_WXID]))
+        await ch._preprocess_inbound(msg)
+        assert not any(isinstance(p, ImageContent) for p in msg.content)
+
+    async def test_preprocess_context_failure_degrades(self) -> None:
+        ch = _make_channel()
+        ch._http = _FakeSession([_FakeResponse(500, {})])  # type: ignore[attr-defined]
+        msg = ch.parse_inbound(self._mentioned_group_text())
+        await ch._preprocess_inbound(msg)  # must not raise
+        assert not any(isinstance(p, ImageContent) for p in msg.content)
+
+    async def test_error_event_not_leaked_to_chat(self) -> None:
+        """ERROR events must not send internal diagnostics to the user."""
+        ch = _make_channel()
+        ch._http = _FakeSession([_FakeResponse(200, {"ok": True})])  # type: ignore[attr-defined]
+        subject = ChannelSubject(subject_id="room@chatroom", chat_type="group")
+        await ch._deliver_event(subject, MessageEvent.error_event("模型调用失败：'main'"))
+        _method, url, kwargs = ch._http.calls[0]
+        assert url.endswith("/send")
+        body = kwargs["json"]
+        assert "'main'" not in body.get("text", "")
+        assert "模型调用失败" not in body.get("text", "")
+
     def test_parse_media_without_path_or_id_falls_back_to_text(self) -> None:
         ch = _make_channel()
         msg = ch.parse_inbound(_event(type="image", text="[image]", media_path=None, local_id=None))

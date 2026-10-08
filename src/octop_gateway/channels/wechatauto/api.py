@@ -73,6 +73,20 @@ class BridgeClient:
                 raise BridgeAPIError(f"events poll failed: {data}", status=resp.status)
             return data  # type: ignore[no-any-return]
 
+    async def get_context(self, *, chat: str, n: int = 8) -> dict[str, Any]:
+        """Recent chat context from the bridge: ``{lines, media}``.
+
+        ``media`` entries (``{path, type}``, oldest→newest) are lazily
+        decrypted by the bridge only for the requested window.
+        """
+        url = f"{self._base_url}/context"
+        params = {"chat": chat, "n": str(n)}
+        async with self._session.get(url, params=params, headers=self._headers()) as resp:
+            data = await resp.json(content_type=None)
+            if resp.status != 200:
+                raise BridgeAPIError(f"context fetch failed: {data}", status=resp.status)
+            return data  # type: ignore[no-any-return]
+
     async def download_media(self, *, chat: str, local_id: int) -> str | None:
         """Ask the bridge to decrypt one media message; returns a local path.
 

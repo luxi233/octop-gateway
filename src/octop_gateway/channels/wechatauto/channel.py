@@ -43,6 +43,8 @@ from octop_gateway.models import (
     FileContent,
     ImageContent,
     InboundMessage,
+    MessageEvent,
+    MessageEventType,
     TextContent,
     VideoContent,
 )
@@ -89,6 +91,12 @@ class WechatAutoConfig(ChannelConfig):
             disables supervision and the channel only reports the failure.
         bridge_startup_timeout: Seconds to wait for a spawned bridge's first
             healthy ``/health`` response before giving up.
+        context_images: How many of the group's most recent images to attach
+            to a mention-triggered turn as real vision input. WeChat cannot
+            combine an @-mention and a picture in one message — users send
+            the image first, then @ the bot — so the picture always arrives
+            as passive group context, which the harness only renders as a
+            text path hint the agent cannot open. ``0`` disables promotion.
     """
 
     base_url: str = _DEFAULT_BASE_URL
@@ -97,6 +105,7 @@ class WechatAutoConfig(ChannelConfig):
     verify_send: bool = False
     bridge_cmd: str = ""
     bridge_startup_timeout: float = 30.0
+    context_images: int = 2
 
     required_credentials = ("token",)
 
@@ -265,6 +274,15 @@ class WechatAutoChannel(BaseChannel):
         elif getattr(media, "data", None) or getattr(media, "local_path", None):
             await self._send_text(subject, f"[{label} (local file)]")
 
+    async def _deliver_event(self, subject: ChannelSubject, event: MessageEvent) -> None:
+        # ERROR events carry internal diagnostics (exception reprs); never
+        # forward them to the chat — log and send a generic notice instead.
+        if event.type == MessageEventType.ERROR:
+            logger.error("wechatauto: agent error event: %s", event.error)
+            await self._rate_limited_send(subject, "处理出错，请稍后再试。")  # noqa: RUF001
+            return
+        await super()._deliver_event(subject, event)
+
     # ------------------------------------------------------------------
     # Inbound
     # ------------------------------------------------------------------
@@ -290,6 +308,52 @@ class WechatAutoChannel(BaseChannel):
             mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
             return data, mime
         return await super().fetch_remote_media(url)
+
+    async def _preprocess_inbound(self, message: InboundMessage) -> None:
+        """Promote the group's freshest image onto a mention trigger.
+
+        Runs before the group-context gate (base ``_prepare_inbound`` calls
+        this hook right after ``parse_inbound``). Only fires when the message
+        is a group mention with no image of its own, so passive chatter and
+        media-bearing triggers are untouched. Context lookup is best-effort:
+        failures degrade to the text-only turn, never block it.
+        """
+        subject = message.channel_subject
+        if (
+            self._config.context_images <= 0
+            or not subject
+            or subject.chat_type != "group"
+            or not message.metadata.get("bot_mentioned")
+            or any(isinstance(p, ImageContent) for p in message.content)
+        ):
+            return
+        chat_id = str(message.metadata.get("chat_id") or "")
+        if not chat_id:
+            return
+        try:
+            api = await self._api()
+            ctx = await api.get_context(chat=chat_id, n=8)
+        except BridgeAPIError:
+            logger.warning("wechatauto context lookup failed for %s", chat_id[:16])
+            return
+        attached = 0
+        # media entries are oldest→newest; take the freshest images.
+        for item in reversed(ctx.get("media") or []):
+            if not isinstance(item, dict) or item.get("type") != "image":
+                continue
+            path = str(item.get("path") or "")
+            if not path:
+                continue
+            message.content.append(ImageContent(url=f"file://{path}"))
+            attached += 1
+            if attached >= self._config.context_images:
+                break
+        if attached:
+            logger.info(
+                "wechatauto: promoted %d context image(s) onto mention turn in %s",
+                attached,
+                chat_id[:16],
+            )
 
     def parse_inbound(self, raw_payload: Any) -> InboundMessage:
         """Parse a bridge event dict into an InboundMessage."""
