@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import mimetypes
 import os
@@ -106,6 +107,8 @@ class WechatAutoConfig(ChannelConfig):
     bridge_cmd: str = ""
     bridge_startup_timeout: float = 30.0
     context_images: int = 2
+    # Empty = ``~/.wechatauto/octop-cursor-<channel_id>.json``.
+    state_file: str = ""
 
     required_credentials = ("token",)
 
@@ -148,6 +151,7 @@ class WechatAutoChannel(BaseChannel):
         self._seen: OrderedDict[str, None] = OrderedDict()
         self._bridge_proc: subprocess.Popen[bytes] | None = None
         self._last_spawn_at = 0.0
+        self._bridge_boot_id = ""
 
     def _default_constraints(self) -> ChannelConstraints:
         return ChannelConstraints(
@@ -188,6 +192,8 @@ class WechatAutoChannel(BaseChannel):
             health = respawned
         self._self_wxid = str(health.get("wxid") or "")
         self._self_nick = str(health.get("nickname") or "")
+        self._bridge_boot_id = str(health.get("boot_id") or "")
+        self._cursor = self._resume_cursor()
         self._connection_session = f"wca:{self._self_wxid}:{uuid.uuid4().hex[:8]}"
         self._poll_task = asyncio.create_task(self._poll_loop(), name=f"wechatauto-poll-{self._channel_id}")
         logger.info("WechatAutoChannel started: account=%s nick=%s", self._self_wxid, self._self_nick)
@@ -480,9 +486,6 @@ class WechatAutoChannel(BaseChannel):
                 api = await self._api()
                 resp = await api.get_events(self._cursor)
                 failures = 0
-                next_cursor = resp.get("cursor")
-                if isinstance(next_cursor, int):
-                    self._cursor = next_cursor
                 for item in resp.get("events") or []:
                     if not isinstance(item, dict):
                         continue
@@ -490,6 +493,12 @@ class WechatAutoChannel(BaseChannel):
                     if not isinstance(ev, dict):
                         continue
                     self._dispatch_event(ev)
+                # Advance+persist only after dispatching the batch: at-least-once
+                # beats silently dropping a batch when the process dies mid-turn.
+                next_cursor = resp.get("cursor")
+                if isinstance(next_cursor, int) and next_cursor != self._cursor:
+                    self._cursor = next_cursor
+                    self._save_cursor()
             except asyncio.CancelledError:
                 break
             except TimeoutError:
@@ -501,11 +510,13 @@ class WechatAutoChannel(BaseChannel):
                 if (
                     isinstance(exc, aiohttp.ClientError)
                     and failures >= _RESPAWN_AFTER_FAILURES
-                    and await self._restart_bridge(exc) is not None
+                    and (respawned := await self._restart_bridge(exc)) is not None
                 ):
                     # A respawned bridge restarts its seq space — replay from
                     # cursor 0; the _seen LRU dedups already-dispatched events.
+                    self._bridge_boot_id = str(respawned.get("boot_id") or "")
                     self._cursor = 0
+                    self._save_cursor()
                     failures = 0
                     continue
                 await asyncio.sleep(min(2**failures, 60))
@@ -514,6 +525,54 @@ class WechatAutoChannel(BaseChannel):
                 failures += 1
                 logger.exception("wechatauto poll error")
                 await asyncio.sleep(min(2**failures, 60))
+
+    # ------------------------------------------------------------------
+    # Cursor persistence
+    # ------------------------------------------------------------------
+
+    def _cursor_state_path(self) -> Path:
+        override = self._config.state_file.strip()
+        if override:
+            return Path(override)
+        return Path.home() / ".wechatauto" / f"octop-cursor-{self._channel_id}.json"
+
+    def _resume_cursor(self) -> int:
+        """Resume the durable cursor when the bridge instance is unchanged.
+
+        The bridge's ``boot_id`` disambiguates the two restart cases: an
+        adapter-only restart resumes the stored cursor so already-dispatched
+        events are not replayed; a bridge restart resets its seq space and
+        must replay from 0 — its queue only holds events the adapter has
+        genuinely not seen. A bridge without ``boot_id`` gives no restart
+        signal, so persistence stays off (replay on every start, the
+        pre-boot_id behavior).
+        """
+        if not self._bridge_boot_id:
+            return 0
+        try:
+            state = json.loads(self._cursor_state_path().read_text(encoding="utf-8"))
+            if isinstance(state, dict) and state.get("boot_id") == self._bridge_boot_id:
+                cursor = int(state.get("cursor") or 0)
+                logger.info("wechatauto resuming cursor=%d (boot_id match)", cursor)
+                return cursor
+        except (OSError, ValueError, TypeError):
+            pass
+        return 0
+
+    def _save_cursor(self) -> None:
+        if not self._bridge_boot_id:
+            return
+        path = self._cursor_state_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(
+                json.dumps({"boot_id": self._bridge_boot_id, "cursor": self._cursor}),
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+        except OSError:
+            logger.exception("wechatauto cursor persist failed")
 
     # ------------------------------------------------------------------
     # Bridge supervision

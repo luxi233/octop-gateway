@@ -13,6 +13,7 @@ No network calls — aiohttp sessions and the BridgeClient are mocked.
 from __future__ import annotations
 
 import base64
+import json
 
 import aiohttp
 import pytest
@@ -205,8 +206,10 @@ class TestWechatAutoChannel:
         ch = _make_channel()
         ch._self_nick = "乐儿"
         ev = _event(
-            chat_id="room@chatroom", chat_type="group",
-            at_usernames=None, text="@乐儿 在吗",
+            chat_id="room@chatroom",
+            chat_type="group",
+            at_usernames=None,
+            text="@乐儿 在吗",
         )
         assert ch.parse_inbound(ev).metadata["bot_mentioned"] is True
 
@@ -214,8 +217,10 @@ class TestWechatAutoChannel:
         ch = _make_channel()
         ch._self_nick = "乐儿"
         ev = _event(
-            chat_id="room@chatroom", chat_type="group",
-            at_usernames=None, text="@乐儿呀 你看",
+            chat_id="room@chatroom",
+            chat_type="group",
+            at_usernames=None,
+            text="@乐儿呀 你看",
         )
         assert ch.parse_inbound(ev).metadata["bot_mentioned"] is False
 
@@ -224,8 +229,10 @@ class TestWechatAutoChannel:
         ch = _make_channel()
         ch._self_nick = "乐儿"
         ev = _event(
-            chat_id="room@chatroom", chat_type="group",
-            at_usernames=[], text="@乐儿 在吗",
+            chat_id="room@chatroom",
+            chat_type="group",
+            at_usernames=[],
+            text="@乐儿 在吗",
         )
         assert ch.parse_inbound(ev).metadata["bot_mentioned"] is False
 
@@ -241,8 +248,12 @@ class TestWechatAutoChannel:
         """Undownloaded media gets a deferred wca-media:// URL, not a placeholder."""
         ch = _make_channel()
         ev = _event(
-            type="image", text="[image]", media_path=None, local_id=42,
-            chat_id="room@chatroom", chat_type="group",
+            type="image",
+            text="[image]",
+            media_path=None,
+            local_id=42,
+            chat_id="room@chatroom",
+            chat_type="group",
         )
         msg = ch.parse_inbound(ev)
         assert isinstance(msg.content[0], ImageContent)
@@ -269,21 +280,31 @@ class TestWechatAutoChannel:
 
     def _mentioned_group_text(self) -> dict:
         return _event(
-            chat_id="room@chatroom", chat_type="group",
-            at_usernames=[_SELF_WXID], text="@me 这个是什么", type="text",
+            chat_id="room@chatroom",
+            chat_type="group",
+            at_usernames=[_SELF_WXID],
+            text="@me 这个是什么",
+            type="text",
         )
 
     async def test_preprocess_promotes_context_image_on_mention(self) -> None:
         """@ mention in a group pulls the freshest context image onto the turn."""
         ch = _make_channel()
-        ch._http = _FakeSession([_FakeResponse(200, {  # type: ignore[attr-defined]
-            "lines": ["a: hi"],
-            "media": [
-                {"path": r"C:\tmp\old.jpg", "type": "image"},
-                {"path": r"C:\tmp\new.jpg", "type": "image"},
-                {"path": r"C:\tmp\v.mp4", "type": "video"},
-            ],
-        })])
+        ch._http = _FakeSession(
+            [
+                _FakeResponse(
+                    200,
+                    {  # type: ignore[attr-defined]
+                        "lines": ["a: hi"],
+                        "media": [
+                            {"path": r"C:\tmp\old.jpg", "type": "image"},
+                            {"path": r"C:\tmp\new.jpg", "type": "image"},
+                            {"path": r"C:\tmp\v.mp4", "type": "video"},
+                        ],
+                    },
+                )
+            ]
+        )
         msg = ch.parse_inbound(self._mentioned_group_text())
         await ch._preprocess_inbound(msg)
         images = [p for p in msg.content if isinstance(p, ImageContent)]
@@ -294,8 +315,7 @@ class TestWechatAutoChannel:
     async def test_preprocess_skips_unmentioned_group(self) -> None:
         ch = _make_channel()
         ch._http = _FakeSession([])  # type: ignore[attr-defined]
-        ev = _event(chat_id="room@chatroom", chat_type="group",
-                    at_usernames=["wxid_other"], text="hello")
+        ev = _event(chat_id="room@chatroom", chat_type="group", at_usernames=["wxid_other"], text="hello")
         msg = ch.parse_inbound(ev)
         await ch._preprocess_inbound(msg)
         assert not any(isinstance(p, ImageContent) for p in msg.content)
@@ -529,3 +549,73 @@ class TestBridgeSupervision:
         ch._launch_bridge = lambda cmd: spawned.append(cmd)  # type: ignore[method-assign]
         assert await ch._restart_bridge(aiohttp.ClientError("x")) is None
         assert spawned == ["fake-bridge"]
+
+
+class TestCursorPersistence:
+    """Durable cursor: resume on adapter restart, reset on bridge restart."""
+
+    def _state(self, tmp_path, **fields) -> str:
+        path = tmp_path / "cursor.json"
+        path.write_text(json.dumps(fields), encoding="utf-8")
+        return str(path)
+
+    @pytest.mark.asyncio
+    async def test_resume_cursor_on_matching_boot_id(self, tmp_path) -> None:
+        state_file = self._state(tmp_path, boot_id="b1", cursor=42)
+        session = _FakeSession([_FakeResponse(200, {"ok": True, "wxid": "w", "nickname": "n", "boot_id": "b1"})])
+        ch = _make_channel(state_file=state_file)
+        ch._http = session
+        await ch.start()
+        try:
+            assert ch._cursor == 42
+        finally:
+            await ch.stop()
+
+    @pytest.mark.asyncio
+    async def test_cursor_zero_on_boot_id_mismatch(self, tmp_path) -> None:
+        state_file = self._state(tmp_path, boot_id="old-boot", cursor=42)
+        session = _FakeSession([_FakeResponse(200, {"ok": True, "wxid": "w", "nickname": "n", "boot_id": "new-boot"})])
+        ch = _make_channel(state_file=state_file)
+        ch._http = session
+        await ch.start()
+        try:
+            assert ch._cursor == 0
+        finally:
+            await ch.stop()
+
+    @pytest.mark.asyncio
+    async def test_no_boot_id_disables_persistence(self, tmp_path) -> None:
+        state_file = self._state(tmp_path, boot_id="b1", cursor=42)
+        session = _FakeSession(
+            [_FakeResponse(200, {"ok": True, "wxid": "w", "nickname": "n"})]  # no boot_id
+        )
+        ch = _make_channel(state_file=state_file)
+        ch._http = session
+        await ch.start()
+        try:
+            assert ch._cursor == 0
+            ch._cursor = 9
+            ch._save_cursor()
+            # Old bridge: state file must stay untouched (still says cursor=42).
+            assert json.loads((tmp_path / "cursor.json").read_text())["cursor"] == 42
+        finally:
+            await ch.stop()
+
+    def test_save_cursor_writes_boot_id_and_cursor(self, tmp_path) -> None:
+        state_file = str(tmp_path / "cursor.json")
+        ch = _make_channel(state_file=state_file)
+        ch._bridge_boot_id = "b1"
+        ch._cursor = 7
+        ch._save_cursor()
+        assert json.loads((tmp_path / "cursor.json").read_text()) == {"boot_id": "b1", "cursor": 7}
+
+    @pytest.mark.asyncio
+    async def test_missing_state_file_starts_at_zero(self, tmp_path) -> None:
+        session = _FakeSession([_FakeResponse(200, {"ok": True, "wxid": "w", "nickname": "n", "boot_id": "b1"})])
+        ch = _make_channel(state_file=str(tmp_path / "absent.json"))
+        ch._http = session
+        await ch.start()
+        try:
+            assert ch._cursor == 0
+        finally:
+            await ch.stop()
