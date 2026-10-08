@@ -20,6 +20,7 @@ import contextlib
 import logging
 import mimetypes
 import os
+import re
 import shlex
 import subprocess
 import tempfile
@@ -333,13 +334,24 @@ class WechatAutoChannel(BaseChannel):
 
         ``at_usernames`` comes from the message ``source`` XML ``<atuserlist>``
         (forgery-proof, unlike pasted ``@nick`` text); quoting the bot's own
-        message counts as a mention, matching WeChat client semantics.
+        message counts as a mention, matching WeChat client semantics. When the
+        field is absent entirely (unreadable source), fall back to matching a
+        literal ``@nickname`` in the text — recall-favoring, same rule as V5's
+        ``isSelfMentioned``: a present-but-empty list is a definitive "not
+        mentioned" and must NOT fall back.
         """
         if not self._self_wxid:
             return False
         at_users = ev.get("at_usernames")
-        if isinstance(at_users, list) and self._self_wxid in at_users:
-            return True
+        if isinstance(at_users, list):
+            if self._self_wxid in at_users:
+                return True
+        else:
+            text = str(ev.get("text") or "")
+            nick = self._self_nick.strip()
+            # "@nick" must end at a boundary — "@李乐儿呀" is not a mention.
+            if nick and re.search(r"@" + re.escape(nick) + r"(?=$|[^\w])", text):
+                return True
         return bool(quoted and str(quoted.get("sender") or "") == self._self_wxid)
 
     def _is_duplicate(self, msg_id: str) -> bool:

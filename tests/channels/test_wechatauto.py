@@ -200,6 +200,35 @@ class TestWechatAutoChannel:
         msg = ch.parse_inbound(ev)
         assert msg.metadata["bot_mentioned"] is False
 
+    def test_mention_alias_fallback_when_atlist_absent(self) -> None:
+        """at_usernames absent (unreadable source) → fall back to @nick text."""
+        ch = _make_channel()
+        ch._self_nick = "乐儿"
+        ev = _event(
+            chat_id="room@chatroom", chat_type="group",
+            at_usernames=None, text="@乐儿 在吗",
+        )
+        assert ch.parse_inbound(ev).metadata["bot_mentioned"] is True
+
+    def test_mention_alias_requires_boundary(self) -> None:
+        ch = _make_channel()
+        ch._self_nick = "乐儿"
+        ev = _event(
+            chat_id="room@chatroom", chat_type="group",
+            at_usernames=None, text="@乐儿呀 你看",
+        )
+        assert ch.parse_inbound(ev).metadata["bot_mentioned"] is False
+
+    def test_mention_no_fallback_when_atlist_empty(self) -> None:
+        """Present-but-empty at_usernames is a definitive 'not mentioned'."""
+        ch = _make_channel()
+        ch._self_nick = "乐儿"
+        ev = _event(
+            chat_id="room@chatroom", chat_type="group",
+            at_usernames=[], text="@乐儿 在吗",
+        )
+        assert ch.parse_inbound(ev).metadata["bot_mentioned"] is False
+
     def test_parse_image_with_media_path(self, tmp_path) -> None:
         img = tmp_path / "pic.jpg"
         img.write_bytes(b"\xff\xd8fake")
