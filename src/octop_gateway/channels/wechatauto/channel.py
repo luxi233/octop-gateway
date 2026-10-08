@@ -423,12 +423,18 @@ class WechatAutoChannel(BaseChannel):
         args: str | list[str]
         if os.name == "nt":
             # Windows passes the raw command line to CreateProcess so quoted
-            # paths work; detach fully from our console and job object.
+            # paths work. CREATE_NO_WINDOW (not DETACHED_PROCESS): the bridge
+            # exe is a packaged console app whose bootloader spawns a console
+            # grandchild; DETACHED leaves it no console to inherit so it
+            # allocates a visible one in the default terminal. A hidden
+            # console on the bridge is inherited by the grandchild instead.
+            # CREATE_BREAKAWAY_FROM_JOB keeps it out of our job object so
+            # host teardown cannot take it down.
             args = cmd
             kwargs["creationflags"] = (
-                getattr(subprocess, "DETACHED_PROCESS", 0)
+                getattr(subprocess, "CREATE_NO_WINDOW", 0)
                 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-                | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                | getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0)
             )
         else:
             args = shlex.split(cmd)
