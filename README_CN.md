@@ -38,7 +38,7 @@
 
 | | 特性 | 说明 |
 |---|------|------|
-| 🔌 | **10 个平台，一个处理器** | 飞书、钉钉、QQ、企业微信、微信 iLink、元宝、小艺、MQTT、Telegram、Discord —— 全部共用一套接口 |
+| 🔌 | **11 个平台，一个处理器** | 飞书、钉钉、QQ、企业微信、微信 iLink、微信 wechatauto、元宝、小艺、MQTT、Telegram、Discord —— 全部共用一套接口 |
 | 🧩 | **统一抽象** | `BaseChannel` 把各平台的差异，收敛为通用的 `InboundMessage` / `MessageEvent` 模型 |
 | 📨 | **流式事件** | 你的处理器是异步生成器，产出 `MessageEvent`，原生支持逐字流式输出 |
 | 💾 | **可插拔媒体** | `MediaBackend` 负责附件存储，默认提供 `FileSystemMediaBackend` |
@@ -70,6 +70,7 @@
 | QQ | `qq` | WebSocket | ✅ | ✅ |
 | 企业微信 | `wecom` | 回调 + API | ✅ | ✅ |
 | 微信 iLink | `weixin` | — | ✅ | ✅ |
+| 微信 wechatauto | `wechatauto` | HTTP 长轮询（本地桥） | ✅ | ✅ |
 | 元宝 | `yuanbao` | — | ✅ | ✅ |
 | 小艺 | `xiaoyi` | — | ✅ | ✅ |
 | MQTT | `mqtt` | MQTT | ✅ | ✅ |

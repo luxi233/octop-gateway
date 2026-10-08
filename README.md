@@ -36,7 +36,7 @@
 
 | | Feature | Description |
 |---|---------|-------------|
-| 🔌 | **10 platforms, one processor** | Feishu, DingTalk, QQ, WeCom, WeChat iLink, Yuanbao, Xiaoyi, MQTT, Telegram, Discord — all behind one interface |
+| 🔌 | **11 platforms, one processor** | Feishu, DingTalk, QQ, WeCom, WeChat iLink, WeChat wechatauto, Yuanbao, Xiaoyi, MQTT, Telegram, Discord — all behind one interface |
 | 🧩 | **Unified abstraction** | `BaseChannel` turns each platform's quirks into a common `InboundMessage` / `MessageEvent` model |
 | 📨 | **Streaming events** | Your processor is an async generator yielding `MessageEvent` — first-class token streaming |
 | 💾 | **Pluggable media** | `MediaBackend` stores attachments; `FileSystemMediaBackend` ships by default |
@@ -74,6 +74,7 @@ Harness Gateway sits between your agent and the outside world. Each platform is 
 | QQ | `qq` | WebSocket | ✅ | ✅ |
 | WeCom (Enterprise WeChat) | `wecom` | Callback + API | ✅ | ✅ |
 | WeChat iLink | `weixin` | — | ✅ | ✅ |
+| WeChat wechatauto | `wechatauto` | HTTP long-poll (local bridge) | ✅ | ✅ |
 | Yuanbao (元宝) | `yuanbao` | — | ✅ | ✅ |
 | Xiaoyi (小艺) | `xiaoyi` | — | ✅ | ✅ |
 | MQTT | `mqtt` | MQTT | ✅ | ✅ |

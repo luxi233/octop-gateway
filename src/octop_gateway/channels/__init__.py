@@ -16,6 +16,7 @@ _CHANNEL_MAP: dict[str, str] = {
     "qq": "octop_gateway.channels.qq",
     "wecom": "octop_gateway.channels.wecom",
     "weixin": "octop_gateway.channels.weixin",
+    "wechatauto": "octop_gateway.channels.wechatauto",
     "yuanbao": "octop_gateway.channels.yuanbao",
     "xiaoyi": "octop_gateway.channels.xiaoyi",
     "mqtt": "octop_gateway.channels.mqtt",
@@ -36,6 +37,7 @@ class ChannelKind(StrEnum):
     QQ = "qq"
     WECOM = "wecom"
     WEIXIN = "weixin"
+    WECHATAUTO = "wechatauto"
     YUANBAO = "yuanbao"
     XIAOYI = "xiaoyi"
     MQTT = "mqtt"
@@ -52,6 +54,7 @@ _CLASS_NAMES: dict[str, str] = {
     "qq": "QQChannel",
     "wecom": "WeComChannel",
     "weixin": "WeixinChannel",
+    "wechatauto": "WechatAutoChannel",
     "yuanbao": "YuanbaoChannel",
     "xiaoyi": "XiaoyiChannel",
     "mqtt": "MQTTChannel",

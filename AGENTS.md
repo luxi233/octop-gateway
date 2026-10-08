@@ -53,7 +53,7 @@ Multi-platform IM channel bridge with a unified message abstraction for AI agent
 
 Core pattern: a `MessageProcessor` (async generator) feeds events through a `BaseChannel` managed by `ChannelManager`.
 
-Built-in channels: Discord, QQ, Feishu (Lark), DingTalk, WeCom (Enterprise WeChat), WeChat iLink, Yuanbao, Xiaoyi, MQTT, Telegram.
+Built-in channels: Discord, QQ, Feishu (Lark), DingTalk, WeCom (Enterprise WeChat), WeChat iLink, WeChat wechatauto, Yuanbao, Xiaoyi, MQTT, Telegram.
 
 | Platform | Channel kind | Transport | Text | Media |
 |----------|--------------|-----------|------|-------|
@@ -63,6 +63,7 @@ Built-in channels: Discord, QQ, Feishu (Lark), DingTalk, WeCom (Enterprise WeCha
 | QQ | `qq` | WebSocket | ✅ | ✅ |
 | 企业微信 | `wecom` | Callback + API | ✅ | ✅ |
 | 微信 iLink | `weixin` | HTTP long-poll | ✅ | ✅ |
+| 微信 wechatauto | `wechatauto` | HTTP long-poll (local bridge) | ✅ | ✅ |
 | 元宝 | `yuanbao` | HTTP REST | ✅ | ✅ |
 | 小艺 | `xiaoyi` | WebSocket | ✅ | ✅ |
 | MQTT | `mqtt` | MQTT | ✅ | ✅ |
@@ -97,6 +98,7 @@ src/octop_gateway/
     ├── qq/            # channel.py + stream.py
     ├── telegram/      # channel.py
     ├── weixin/        # api.py + login_qr.py + media.py
+    ├── wechatauto/    # api.py (bridge HTTP client) + channel.py
     ├── xiaoyi/  yuanbao/
     └── __init__.py    # _CHANNEL_MAP + _CLASS_NAMES + ChannelKind + SUPPORTED_CHANNEL_KINDS
 tests/                 # pytest, mirrors src/ (`tests/channels/test_{name}.py` per channel)

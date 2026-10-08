@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from octop_gateway.channels.mqtt import MQTTConfig
     from octop_gateway.channels.qq import QQConfig
     from octop_gateway.channels.telegram import TelegramConfig
+    from octop_gateway.channels.wechatauto.channel import WechatAutoConfig
     from octop_gateway.channels.wecom import WeComConfig
     from octop_gateway.channels.weixin.channel import WeixinConfig
     from octop_gateway.channels.xiaoyi import XiaoyiConfig
@@ -981,6 +982,35 @@ class ChannelManager:
             )
         """
         return await self.add_channel("weixin", config, processor=processor, **kwargs)
+
+    async def add_wechatauto_channel(
+        self,
+        config: WechatAutoConfig,
+        *,
+        processor: MessageProcessor | None = None,
+        **kwargs: Any,
+    ) -> str:
+        """Add a WeChat (wechatauto bridge) channel.
+
+        Shorthand for ``add_channel(channel_type="wechatauto", config=config, ...)``.
+
+        Args:
+            config: :class:`~octop_gateway.channels.wechatauto.channel.WechatAutoConfig` instance.
+            processor: Optional processor override.
+            **kwargs: Extra kwargs forwarded to the channel constructor.
+
+        Returns:
+            The ``channel_id`` (UUID hex).
+
+        Example::
+
+            from octop_gateway.channels.wechatauto import WechatAutoConfig
+
+            ch_id = await manager.add_wechatauto_channel(
+                WechatAutoConfig(token="bridge-token")
+            )
+        """
+        return await self.add_channel("wechatauto", config, processor=processor, **kwargs)
 
     async def add_yuanbao_channel(
         self,
