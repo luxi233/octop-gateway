@@ -6,6 +6,7 @@ Bearer-token HTTP API:
 
 - ``GET  /health``                          → ``{ok, wxid, nickname, media}``
 - ``GET  /events?cursor=N&timeout_ms=T``    → ``{cursor, events: [{seq, event}]}``
+- ``GET  /media?chat=X&local_id=N``         → ``{ok, path}`` (on-demand decrypt)
 - ``POST /send       {to, text, verify?}``  → ``{ok, results}``
 - ``POST /send_file  {to, path, image?}``   → ``{ok, ...}``
 """
@@ -71,6 +72,21 @@ class BridgeClient:
             if resp.status != 200:
                 raise BridgeAPIError(f"events poll failed: {data}", status=resp.status)
             return data  # type: ignore[no-any-return]
+
+    async def download_media(self, *, chat: str, local_id: int) -> str | None:
+        """Ask the bridge to decrypt one media message; returns a local path.
+
+        ``None`` means the media is no longer decryptable (WeChat image keys
+        are transient — old attachments may be gone for good).
+        """
+        url = f"{self._base_url}/media"
+        params = {"chat": chat, "local_id": str(local_id)}
+        async with self._session.get(url, params=params, headers=self._headers()) as resp:
+            data = await resp.json(content_type=None)
+            if resp.status != 200:
+                raise BridgeAPIError(f"media download failed: {data}", status=resp.status)
+            path = data.get("path")
+            return str(path) if path else None
 
     async def send_text(self, *, to: str, text: str, verify: bool = False) -> dict[str, Any]:
         """Send a text message through the bridge's UIA path."""

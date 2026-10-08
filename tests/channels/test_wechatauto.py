@@ -234,14 +234,42 @@ class TestWechatAutoChannel:
         img.write_bytes(b"\xff\xd8fake")
         ch = _make_channel()
         msg = ch.parse_inbound(_event(type="image", text="[image]", media_path=str(img)))
-        assert len(msg.content) == 1
-        part = msg.content[0]
-        assert isinstance(part, ImageContent)
-        assert part.url == f"file://{img}"
+        assert isinstance(msg.content[0], ImageContent)
+        assert msg.content[0].url == f"file://{img}"
 
-    def test_parse_media_without_path_falls_back_to_text(self) -> None:
+    def test_parse_image_lazy_media_url(self) -> None:
+        """Undownloaded media gets a deferred wca-media:// URL, not a placeholder."""
         ch = _make_channel()
-        msg = ch.parse_inbound(_event(type="image", text="[image]", media_path=None))
+        ev = _event(
+            type="image", text="[image]", media_path=None, local_id=42,
+            chat_id="room@chatroom", chat_type="group",
+        )
+        msg = ch.parse_inbound(ev)
+        assert isinstance(msg.content[0], ImageContent)
+        assert msg.content[0].url == "wca-media://room@chatroom/42"
+
+    async def test_fetch_remote_media_lazy_url(self, tmp_path) -> None:
+        img = tmp_path / "shot.jpg"
+        img.write_bytes(b"\xff\xd8real-bytes")
+        ch = _make_channel()
+        session = _FakeSession([_FakeResponse(200, {"ok": True, "path": str(img)})])
+        ch._http = session  # type: ignore[attr-defined]
+        data, mime = await ch.fetch_remote_media("wca-media://room@chatroom/42")
+        assert data == b"\xff\xd8real-bytes"
+        assert "image" in mime
+        method, url, kwargs = session.calls[0]
+        assert method == "GET" and url.endswith("/media")
+        assert kwargs["params"]["local_id"] == "42"
+
+    async def test_fetch_remote_media_lazy_undecryptable(self) -> None:
+        ch = _make_channel()
+        ch._http = _FakeSession([_FakeResponse(200, {"ok": False, "path": None})])  # type: ignore[attr-defined]
+        with pytest.raises(BridgeAPIError):
+            await ch.fetch_remote_media("wca-media://room@chatroom/99")
+
+    def test_parse_media_without_path_or_id_falls_back_to_text(self) -> None:
+        ch = _make_channel()
+        msg = ch.parse_inbound(_event(type="image", text="[image]", media_path=None, local_id=None))
         assert isinstance(msg.content[0], TextContent)
         assert msg.content[0].text == "[image]"
 

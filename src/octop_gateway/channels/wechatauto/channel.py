@@ -62,6 +62,10 @@ _MEDIA_TYPE_BY_EVENT = {
 
 _SEEN_MAX = 1000
 
+# Deferred-fetch scheme for inbound media the bridge has not decrypted yet.
+# ``wca-media://<chat_id>/<local_id>`` is resolved in fetch_remote_media.
+_LAZY_MEDIA_SCHEME = "wca-media://"
+
 # Bridge supervision: respawn attempts need this many consecutive transport
 # failures in the poll loop, and are rate-limited by the cooldown so a broken
 # spawn command cannot loop forever.
@@ -266,7 +270,20 @@ class WechatAutoChannel(BaseChannel):
     # ------------------------------------------------------------------
 
     async def fetch_remote_media(self, url: str) -> tuple[bytes, str]:
-        """Read inbound media handed over by the bridge as ``file://`` paths."""
+        """Read inbound media handed over by the bridge.
+
+        ``file://`` paths are already-decrypted files; ``wca-media://``
+        URLs ask the bridge to decrypt the message first (``GET /media``),
+        then read the resulting local file.
+        """
+        if url.startswith(_LAZY_MEDIA_SCHEME):
+            rest = url[len(_LAZY_MEDIA_SCHEME) :]
+            chat, _, lid = rest.rpartition("/")
+            api = await self._api()
+            path = await api.download_media(chat=chat, local_id=int(lid))
+            if not path:
+                raise BridgeAPIError(f"bridge could not decrypt media: {url}")
+            url = f"file://{path}"
         if url.startswith("file://"):
             path = url[len("file://") :]
             data = await asyncio.to_thread(Path(path).read_bytes)
@@ -289,9 +306,22 @@ class WechatAutoChannel(BaseChannel):
 
         content: list[ContentPart] = []
         media_cls = _MEDIA_TYPE_BY_EVENT.get(msg_type)
-        if media_cls is not None and media_path:
-            kwargs: dict[str, Any] = {"url": f"file://{media_path}"}
-            if media_cls is FileContent:
+        media_url = ""
+        if media_cls is not None:
+            if media_path:
+                media_url = f"file://{media_path}"
+            else:
+                # Undownloaded media → deferred-fetch URL. The bridge decrypts
+                # on demand via GET /media (post-gate lazy download); without
+                # it the agent only ever saw "[image]" placeholders and had to
+                # confabulate — observed 2026-10-08 as a shrimp photo answered
+                # with a copper-price table.
+                local_id = ev.get("local_id")
+                if isinstance(local_id, int) and local_id > 0 and chat_id:
+                    media_url = f"{_LAZY_MEDIA_SCHEME}{chat_id}/{local_id}"
+        if media_url and media_cls is not None:
+            kwargs: dict[str, Any] = {"url": media_url}
+            if media_cls is FileContent and media_path:
                 kwargs["filename"] = Path(media_path).name
             content.append(media_cls(**kwargs))
         elif text:
