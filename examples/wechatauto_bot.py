@@ -38,6 +38,8 @@ async def main():
         WechatAutoConfig(
             base_url=os.environ.get("WECHATAUTO_BASE_URL", "http://127.0.0.1:18765"),
             token=os.environ["WECHATAUTO_TOKEN"],
+            # Optional: let the channel spawn the bridge when it is unreachable.
+            bridge_cmd=os.environ.get("WECHATAUTO_BRIDGE_CMD", ""),
         )
     )
     print(f"   channel_id: {channel_id}")

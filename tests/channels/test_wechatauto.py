@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 
+import aiohttp
 import pytest
 
 from octop_gateway.channel import ChannelCredentialsError
@@ -87,20 +88,30 @@ class _FakeResponse:
 
 
 class _FakeSession:
-    """Records requests and serves canned responses keyed by call order."""
+    """Records requests and serves canned responses keyed by call order.
 
-    def __init__(self, responses: list[_FakeResponse]) -> None:
+    Entries may be exceptions, which are raised instead of returned —
+    used to simulate transport-level failures like a dead bridge.
+    """
+
+    def __init__(self, responses: list) -> None:
         self._responses = list(responses)
         self.calls: list[tuple[str, str, dict]] = []
         self.closed = False
 
+    def _next(self):
+        r = self._responses.pop(0) if self._responses else _FakeResponse(500, {})
+        if isinstance(r, BaseException):
+            raise r
+        return r
+
     def get(self, url, **kwargs):
         self.calls.append(("GET", url, kwargs))
-        return self._responses.pop(0) if self._responses else _FakeResponse(500, {})
+        return self._next()
 
     def post(self, url, **kwargs):
         self.calls.append(("POST", url, kwargs))
-        return self._responses.pop(0) if self._responses else _FakeResponse(500, {})
+        return self._next()
 
     async def close(self) -> None:
         self.closed = True
@@ -326,3 +337,79 @@ class TestWechatAutoStart:
             assert ch._poll_task is not None
         finally:
             await ch.stop()
+
+
+class TestBridgeSupervision:
+    """bridge_cmd supervision: spawn on unreachable bridge, cooldown, 401 exempt."""
+
+    @pytest.mark.asyncio
+    async def test_start_spawns_bridge_when_unreachable(self) -> None:
+        session = _FakeSession(
+            [
+                aiohttp.ClientError("conn refused"),  # initial health fails
+                _FakeResponse(200, {"ok": True, "wxid": _SELF_WXID, "nickname": "me"}),
+            ]
+        )
+        ch = _make_channel(bridge_cmd="fake-bridge --token t", bridge_startup_timeout=5.0)
+        ch._http = session
+        spawned: list[str] = []
+        ch._launch_bridge = lambda cmd: spawned.append(cmd)  # type: ignore[method-assign]
+        await ch.start()
+        try:
+            assert spawned == ["fake-bridge --token t"]
+            assert ch._connection_session.startswith(f"wca:{_SELF_WXID}:")
+            assert ch._poll_task is not None
+        finally:
+            await ch.stop()
+
+    @pytest.mark.asyncio
+    async def test_start_unreachable_without_bridge_cmd_raises(self) -> None:
+        session = _FakeSession([aiohttp.ClientError("conn refused")])
+        ch = _make_channel()
+        ch._http = session
+        spawned: list[str] = []
+        ch._launch_bridge = lambda cmd: spawned.append(cmd)  # type: ignore[method-assign]
+        with pytest.raises(aiohttp.ClientError):
+            await ch.start()
+        assert spawned == []
+        assert ch._poll_task is None
+
+    @pytest.mark.asyncio
+    async def test_start_401_never_spawns(self) -> None:
+        session = _FakeSession([_FakeResponse(401, {"ok": False, "error": "unauthorized"})])
+        ch = _make_channel(bridge_cmd="fake-bridge")
+        ch._http = session
+        spawned: list[str] = []
+        ch._launch_bridge = lambda cmd: spawned.append(cmd)  # type: ignore[method-assign]
+        with pytest.raises(ChannelCredentialsError):
+            await ch.start()
+        assert spawned == []
+
+    @pytest.mark.asyncio
+    async def test_restart_bridge_recovers_and_cools_down(self) -> None:
+        session = _FakeSession(
+            [
+                _FakeResponse(200, {"ok": True, "wxid": "w", "nickname": "n"}),
+            ]
+        )
+        ch = _make_channel(bridge_cmd="fake-bridge", bridge_startup_timeout=5.0)
+        ch._http = session
+        ch._running = True
+        spawned: list[str] = []
+        ch._launch_bridge = lambda cmd: spawned.append(cmd)  # type: ignore[method-assign]
+        health = await ch._restart_bridge(aiohttp.ClientError("x"))
+        assert health is not None and health["wxid"] == "w"
+        # Second call inside the cooldown window must not spawn again.
+        assert await ch._restart_bridge(aiohttp.ClientError("x")) is None
+        assert spawned == ["fake-bridge"]
+
+    @pytest.mark.asyncio
+    async def test_restart_bridge_spawn_timeout_returns_none(self) -> None:
+        session = _FakeSession([])  # health would return 500 — never healthy
+        ch = _make_channel(bridge_cmd="fake-bridge", bridge_startup_timeout=0.0)
+        ch._http = session
+        ch._running = True
+        spawned: list[str] = []
+        ch._launch_bridge = lambda cmd: spawned.append(cmd)  # type: ignore[method-assign]
+        assert await ch._restart_bridge(aiohttp.ClientError("x")) is None
+        assert spawned == ["fake-bridge"]

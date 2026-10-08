@@ -20,6 +20,8 @@ import contextlib
 import logging
 import mimetypes
 import os
+import shlex
+import subprocess
 import tempfile
 import time
 import uuid
@@ -59,6 +61,12 @@ _MEDIA_TYPE_BY_EVENT = {
 
 _SEEN_MAX = 1000
 
+# Bridge supervision: respawn attempts need this many consecutive transport
+# failures in the poll loop, and are rate-limited by the cooldown so a broken
+# spawn command cannot loop forever.
+_RESPAWN_AFTER_FAILURES = 3
+_SPAWN_COOLDOWN_S = 60.0
+
 
 @dataclass
 class WechatAutoConfig(ChannelConfig):
@@ -71,12 +79,19 @@ class WechatAutoConfig(ChannelConfig):
         verify_send: Ask the bridge to re-read the DB and confirm each send
             lands in the target chat. Off by default — the read-back uses a
             snapshot that lags while WeChat is actively writing.
+        bridge_cmd: Optional command line used to spawn a local bridge when it
+            is unreachable, e.g. ``wechatauto-bridge --token <token>``. Empty
+            disables supervision and the channel only reports the failure.
+        bridge_startup_timeout: Seconds to wait for a spawned bridge's first
+            healthy ``/health`` response before giving up.
     """
 
     base_url: str = _DEFAULT_BASE_URL
     token: str = ""
     poll_timeout_ms: int = _DEFAULT_POLL_TIMEOUT_MS
     verify_send: bool = False
+    bridge_cmd: str = ""
+    bridge_startup_timeout: float = 30.0
 
     required_credentials = ("token",)
 
@@ -117,6 +132,8 @@ class WechatAutoChannel(BaseChannel):
         self._self_nick = ""
         self._connection_session: str | None = None
         self._seen: OrderedDict[str, None] = OrderedDict()
+        self._bridge_proc: subprocess.Popen[bytes] | None = None
+        self._last_spawn_at = 0.0
 
     def _default_constraints(self) -> ChannelConstraints:
         return ChannelConstraints(
@@ -132,6 +149,8 @@ class WechatAutoChannel(BaseChannel):
     # Lifecycle
     # ------------------------------------------------------------------
 
+    # Note: bridge supervision (spawn-on-failure, cursor reset) rationale —
+    # see .agents/notes/implemented/feature/2026-10-08-bridge-supervision.md
     async def start(self) -> None:
         """Verify bridge health, then start the events long-poll task."""
         self._running = True
@@ -144,6 +163,15 @@ class WechatAutoChannel(BaseChannel):
             if exc.status == 401:
                 raise ChannelCredentialsError(self.channel_type, ["token"]) from exc
             raise
+        except (aiohttp.ClientError, OSError) as exc:
+            # Connection refused → the bridge process is down; respawn it when
+            # bridge_cmd is configured. HTTP errors (401/5xx) mean the bridge
+            # is alive and must not trigger a respawn.
+            respawned = await self._restart_bridge(exc)
+            if respawned is None:
+                self._running = False
+                raise
+            health = respawned
         self._self_wxid = str(health.get("wxid") or "")
         self._self_nick = str(health.get("nickname") or "")
         self._connection_session = f"wca:{self._self_wxid}:{uuid.uuid4().hex[:8]}"
@@ -364,12 +392,81 @@ class WechatAutoChannel(BaseChannel):
             except (aiohttp.ClientError, BridgeAPIError) as exc:
                 failures += 1
                 logger.warning("wechatauto poll failed: %s (%d)", exc, failures)
+                if (
+                    isinstance(exc, aiohttp.ClientError)
+                    and failures >= _RESPAWN_AFTER_FAILURES
+                    and await self._restart_bridge(exc) is not None
+                ):
+                    # A respawned bridge restarts its seq space — replay from
+                    # cursor 0; the _seen LRU dedups already-dispatched events.
+                    self._cursor = 0
+                    failures = 0
+                    continue
                 await asyncio.sleep(min(2**failures, 60))
             except Exception:  # pylint: disable=broad-except
                 # The poll loop must survive unexpected transport errors.
                 failures += 1
                 logger.exception("wechatauto poll error")
                 await asyncio.sleep(min(2**failures, 60))
+
+    # ------------------------------------------------------------------
+    # Bridge supervision
+    # ------------------------------------------------------------------
+
+    def _launch_bridge(self, cmd: str) -> None:
+        """Spawn the bridge detached so it survives this process's lifetime."""
+        kwargs: dict[str, Any] = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+        }
+        args: str | list[str]
+        if os.name == "nt":
+            # Windows passes the raw command line to CreateProcess so quoted
+            # paths work; detach fully from our console and job object.
+            args = cmd
+            kwargs["creationflags"] = (
+                getattr(subprocess, "DETACHED_PROCESS", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            )
+        else:
+            args = shlex.split(cmd)
+            kwargs["start_new_session"] = True
+        self._bridge_proc = subprocess.Popen(args, **kwargs)
+        logger.info("wechatauto bridge spawned: pid=%s", self._bridge_proc.pid)
+
+    async def _wait_healthy(self) -> dict[str, Any] | None:
+        """Poll ``/health`` until the bridge answers or the timeout expires."""
+        deadline = time.monotonic() + self._config.bridge_startup_timeout
+        while self._running and time.monotonic() < deadline:
+            try:
+                api = await self._api()
+                return await api.health()
+            except (aiohttp.ClientError, BridgeAPIError):
+                await asyncio.sleep(1.0)
+        return None
+
+    async def _restart_bridge(self, cause: BaseException) -> dict[str, Any] | None:
+        """Best-effort respawn of a dead bridge; returns health or None.
+
+        ``None`` means supervision is disabled (no ``bridge_cmd``), the spawn
+        is within cooldown, or the bridge never became healthy. The bridge is
+        shared host infrastructure and is deliberately never killed — other
+        consumers (Hermes adapter, CLI) may depend on it.
+        """
+        cmd = self._config.bridge_cmd
+        now = time.monotonic()
+        if not cmd or now - self._last_spawn_at < _SPAWN_COOLDOWN_S:
+            return None
+        self._last_spawn_at = now
+        logger.warning("wechatauto bridge unreachable (%s); spawning: %s", cause, cmd)
+        try:
+            self._launch_bridge(cmd)
+        except OSError:
+            logger.exception("wechatauto bridge launch failed")
+            return None
+        return await self._wait_healthy()
 
     def _dispatch_event(self, ev: dict[str, Any]) -> None:
         """Filter and enqueue a single bridge event."""
