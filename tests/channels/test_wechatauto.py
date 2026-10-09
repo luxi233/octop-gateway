@@ -374,6 +374,33 @@ class TestWechatAutoChannel:
         ch._dispatch_event(_event(id="wxid_peer1:1002", text="second"))
         assert [e["id"] for e in enqueued] == ["wxid_peer1:1001", "wxid_peer1:1002"]
 
+    def test_dispatch_group_allow_drops_unlisted(self) -> None:
+        ch = _make_channel(group_allow=["111@chatroom"])
+        enqueued: list[dict] = []
+        ch._enqueue_callback = enqueued.append
+        ch._dispatch_event(_event(
+            id="g:1", chat_id="222@chatroom", chat_type="group",
+            sender_id="wxid_peer1"))
+        ch._dispatch_event(_event(
+            id="g:2", chat_id="111@chatroom", chat_type="group",
+            sender_id="wxid_peer2"))
+        ch._dispatch_event(_event(id="d:1"))  # DM 不受白名单影响
+        assert [e["id"] for e in enqueued] == ["g:2", "d:1"]
+
+    def test_dispatch_group_allow_empty_admits_all(self) -> None:
+        ch = _make_channel()
+        enqueued: list[dict] = []
+        ch._enqueue_callback = enqueued.append
+        ch._dispatch_event(_event(
+            id="g:1", chat_id="222@chatroom", chat_type="group",
+            sender_id="wxid_peer1"))
+        assert [e["id"] for e in enqueued] == ["g:1"]
+
+    def test_group_allow_from_dict(self) -> None:
+        cfg = WechatAutoConfig.from_dict(
+            {"token": "t", "group_allow": ["111@chatroom"]})
+        assert cfg.group_allow == ["111@chatroom"]
+
     def test_session_id_fallback(self) -> None:
         ch = WechatAutoChannel(processor=_noop_processor, config=_make_config(), channel_id="cid1")
         msg = ch.parse_inbound(_event())

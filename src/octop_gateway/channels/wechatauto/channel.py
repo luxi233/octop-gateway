@@ -28,7 +28,7 @@ import tempfile
 import time
 import uuid
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -98,6 +98,10 @@ class WechatAutoConfig(ChannelConfig):
             the image first, then @ the bot — so the picture always arrives
             as passive group context, which the harness only renders as a
             text path hint the agent cannot open. ``0`` disables promotion.
+        group_allow: Group chat ids (``*@chatroom``) allowed to reach the
+            agent. Empty disables filtering — every group is admitted.
+            Non-listed groups are dropped before group-context buffering:
+            no trigger and no passive-chatter recording. DMs unaffected.
     """
 
     base_url: str = _DEFAULT_BASE_URL
@@ -107,6 +111,7 @@ class WechatAutoConfig(ChannelConfig):
     bridge_cmd: str = ""
     bridge_startup_timeout: float = 30.0
     context_images: int = 2
+    group_allow: list[str] = field(default_factory=list)
     # Empty = ``~/.wechatauto/octop-cursor-<channel_id>.json``.
     state_file: str = ""
 
@@ -663,6 +668,14 @@ class WechatAutoChannel(BaseChannel):
     def _dispatch_event(self, ev: dict[str, Any]) -> None:
         """Filter and enqueue a single bridge event."""
         if ev.get("is_self"):
+            return
+        chat_id = str(ev.get("chat_id") or "")
+        if (
+            chat_id.endswith("@chatroom")
+            and self._config.group_allow
+            and chat_id not in self._config.group_allow
+        ):
+            logger.debug("wechatauto: dropping group %s (not in group_allow)", chat_id)
             return
         msg_id = str(ev.get("id") or "")
         if msg_id and self._is_duplicate(msg_id):
