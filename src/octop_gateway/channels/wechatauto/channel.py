@@ -486,6 +486,23 @@ class WechatAutoChannel(BaseChannel):
                 api = await self._api()
                 resp = await api.get_events(self._cursor)
                 failures = 0
+                # A bridge respawned by someone else (GUI watchdog, manual
+                # start, login .bat) has a fresh seq space — our cursor is
+                # meaningless against it. Detect via the boot_id echoed in
+                # /events and replay from 0; the _seen LRU dedups. Absent
+                # boot_id (pre-boot_id bridge) means "cannot verify", so we
+                # keep the cursor rather than replaying the buffer blindly.
+                boot_id = str(resp.get("boot_id") or "")
+                if boot_id and boot_id != self._bridge_boot_id:
+                    logger.info(
+                        "wechatauto bridge restarted externally (boot_id %s -> %s); resetting cursor",
+                        self._bridge_boot_id[:8] or "none",
+                        boot_id[:8],
+                    )
+                    self._bridge_boot_id = boot_id
+                    self._cursor = 0
+                    self._save_cursor()
+                    continue
                 for item in resp.get("events") or []:
                     if not isinstance(item, dict):
                         continue
@@ -613,9 +630,7 @@ class WechatAutoChannel(BaseChannel):
         while self._running and time.monotonic() < deadline:
             proc = self._bridge_proc
             if proc is not None and proc.poll() is not None:
-                logger.warning(
-                    "wechatauto bridge exited during startup: rc=%s", proc.returncode
-                )
+                logger.warning("wechatauto bridge exited during startup: rc=%s", proc.returncode)
                 return None
             try:
                 api = await self._api()

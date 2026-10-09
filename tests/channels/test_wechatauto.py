@@ -12,6 +12,7 @@ No network calls — aiohttp sessions and the BridgeClient are mocked.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 
@@ -617,5 +618,37 @@ class TestCursorPersistence:
         await ch.start()
         try:
             assert ch._cursor == 0
+        finally:
+            await ch.stop()
+
+    @pytest.mark.asyncio
+    async def test_external_bridge_respawn_detected_via_events_boot_id(self, tmp_path) -> None:
+        """Third-party respawn (watchdog/manual) changes boot_id mid-poll.
+
+        The adapter must notice via the /events payload, reset its cursor,
+        and replay the fresh seq space — otherwise every event below the
+        stale cursor is silently dropped.
+        """
+        state_file = str(tmp_path / "cursor.json")
+        session = _FakeSession(
+            [
+                _FakeResponse(200, {"ok": True, "wxid": "w", "nickname": "n", "boot_id": "b1"}),
+                _FakeResponse(200, {"cursor": 20, "events": [], "boot_id": "b1"}),
+                _FakeResponse(200, {"cursor": 20, "events": [], "boot_id": "b2"}),
+                _FakeResponse(200, {"cursor": 1, "events": [{"seq": 1, "event": _event()}], "boot_id": "b2"}),
+            ]
+        )
+        ch = _make_channel(state_file=state_file)
+        ch._http = session
+        await ch.start()
+        try:
+            for _ in range(100):
+                if ch._cursor == 1 and ch._bridge_boot_id == "b2":
+                    break
+                await asyncio.sleep(0.02)
+            assert ch._bridge_boot_id == "b2"
+            assert ch._cursor == 1
+            state = json.loads((tmp_path / "cursor.json").read_text(encoding="utf-8"))
+            assert state == {"boot_id": "b2", "cursor": 1}
         finally:
             await ch.stop()
