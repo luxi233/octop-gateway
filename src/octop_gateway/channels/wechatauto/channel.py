@@ -611,6 +611,12 @@ class WechatAutoChannel(BaseChannel):
         """Poll ``/health`` until the bridge answers or the timeout expires."""
         deadline = time.monotonic() + self._config.bridge_startup_timeout
         while self._running and time.monotonic() < deadline:
+            proc = self._bridge_proc
+            if proc is not None and proc.poll() is not None:
+                logger.warning(
+                    "wechatauto bridge exited during startup: rc=%s", proc.returncode
+                )
+                return None
             try:
                 api = await self._api()
                 return await api.health()
