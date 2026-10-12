@@ -102,18 +102,24 @@ class BridgeClient:
             path = data.get("path")
             return str(path) if path else None
 
-    async def send_text(self, *, to: str, text: str, verify: bool = False) -> dict[str, Any]:
-        """Send a text message through the bridge's UIA path."""
-        payload = {"to": to, "text": text, "verify": verify}
+    async def send_text(self, *, to: str, text: str, verify: bool = False, client_msg_id: str = "") -> dict[str, Any]:
+        """Send a text message through the bridge's UIA path.
+
+        ``client_msg_id`` enables bridge-side dedup: a retried request with
+        the same id returns the cached success instead of double-sending.
+        """
+        payload = {"to": to, "text": text, "verify": verify, "client_msg_id": client_msg_id}
         async with self._session.post(f"{self._base_url}/send", json=payload, headers=self._headers()) as resp:
             data = await resp.json(content_type=None)
             if resp.status != 200 or not data.get("ok"):
                 raise BridgeAPIError(f"send_text failed: {data}", status=resp.status)
             return data  # type: ignore[no-any-return]
 
-    async def send_file(self, *, to: str, path: str, image: bool = False, verify: bool = False) -> dict[str, Any]:
+    async def send_file(
+        self, *, to: str, path: str, image: bool = False, verify: bool = False, client_msg_id: str = ""
+    ) -> dict[str, Any]:
         """Send a file/image from a local path through the bridge."""
-        payload = {"to": to, "path": path, "image": image, "verify": verify}
+        payload = {"to": to, "path": path, "image": image, "verify": verify, "client_msg_id": client_msg_id}
         async with self._session.post(f"{self._base_url}/send_file", json=payload, headers=self._headers()) as resp:
             data = await resp.json(content_type=None)
             if resp.status != 200 or not data.get("ok"):

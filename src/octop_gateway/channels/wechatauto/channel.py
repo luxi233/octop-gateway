@@ -75,6 +75,11 @@ _LAZY_MEDIA_SCHEME = "wca-media://"
 _RESPAWN_AFTER_FAILURES = 3
 _SPAWN_COOLDOWN_S = 60.0
 
+# Outbound: one retry, only on transport-layer failure. 8s sits inside the
+# supervisor respawn window (spawn + startup check ≈ 4-6s) and well inside
+# the bridge's 600s dedup TTL.
+_SEND_RETRY_DELAY_S = 8.0
+
 
 @dataclass
 class WechatAutoConfig(ChannelConfig):
@@ -224,9 +229,28 @@ class WechatAutoChannel(BaseChannel):
         return str(meta.get("chat_id") or meta.get("to_handle") or subject.subject_id)
 
     async def _send_text(self, subject: ChannelSubject, text: str) -> None:
-        """Send text through the bridge's UIA send path."""
+        """Send text through the bridge's UIA send path.
+
+        One retry on transport-layer failure only (no bridge response —
+        the classic case is the bridge process dying mid-send and a
+        supervisor respawning it seconds later). HTTP errors are never
+        retried: chunked /send could be half-sent, and a blind replay
+        would duplicate the delivered chunks. The stable ``client_msg_id``
+        lets the bridge dedup the ambiguous "sent but response lost" case.
+        """
         api = await self._api()
-        await api.send_text(to=self._send_target(subject), text=text, verify=self._config.verify_send)
+        target = self._send_target(subject)
+        mid = f"wca-{self._channel_id}-{uuid.uuid4().hex[:12]}"
+        try:
+            await api.send_text(to=target, text=text, verify=self._config.verify_send, client_msg_id=mid)
+        except (TimeoutError, aiohttp.ClientError, OSError):
+            logger.warning(
+                "wechatauto send transport error to %s; retrying in %.0fs",
+                target[:16],
+                _SEND_RETRY_DELAY_S,
+            )
+            await asyncio.sleep(_SEND_RETRY_DELAY_S)
+            await api.send_text(to=target, text=text, verify=self._config.verify_send, client_msg_id=mid)
 
     async def _send_content(self, subject: ChannelSubject, parts: list[ContentPart]) -> None:
         """Send content parts in order."""
@@ -261,12 +285,24 @@ class WechatAutoChannel(BaseChannel):
             with os.fdopen(fd, "wb") as f:
                 f.write(data)
             api = await self._api()
-            await api.send_file(
+            mid = f"wca-{self._channel_id}-{uuid.uuid4().hex[:12]}"
+            kwargs: dict[str, Any] = dict(
                 to=to,
                 path=tmp_path,
                 image=isinstance(media, ImageContent),
                 verify=self._config.verify_send,
+                client_msg_id=mid,
             )
+            try:
+                await api.send_file(**kwargs)
+            except (TimeoutError, aiohttp.ClientError, OSError):
+                logger.warning(
+                    "wechatauto media send transport error to %s; retrying in %.0fs",
+                    to[:16],
+                    _SEND_RETRY_DELAY_S,
+                )
+                await asyncio.sleep(_SEND_RETRY_DELAY_S)
+                await api.send_file(**kwargs)
             logger.info("WechatAutoChannel media sent: type=%s to=%s", type(media).__name__, to[:16])
             return True
         except Exception:  # pylint: disable=broad-except
@@ -670,11 +706,7 @@ class WechatAutoChannel(BaseChannel):
         if ev.get("is_self"):
             return
         chat_id = str(ev.get("chat_id") or "")
-        if (
-            chat_id.endswith("@chatroom")
-            and self._config.group_allow
-            and chat_id not in self._config.group_allow
-        ):
+        if chat_id.endswith("@chatroom") and self._config.group_allow and chat_id not in self._config.group_allow:
             logger.debug("wechatauto: dropping group %s (not in group_allow)", chat_id)
             return
         msg_id = str(ev.get("id") or "")

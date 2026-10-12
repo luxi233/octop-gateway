@@ -21,6 +21,7 @@ import pytest
 
 from octop_gateway.channel import ChannelCredentialsError
 from octop_gateway.channels.wechatauto import WechatAutoChannel, WechatAutoConfig
+from octop_gateway.channels.wechatauto import channel as wca_channel
 from octop_gateway.channels.wechatauto.api import BridgeAPIError
 from octop_gateway.models import (
     ChannelSubject,
@@ -378,12 +379,8 @@ class TestWechatAutoChannel:
         ch = _make_channel(group_allow=["111@chatroom"])
         enqueued: list[dict] = []
         ch._enqueue_callback = enqueued.append
-        ch._dispatch_event(_event(
-            id="g:1", chat_id="222@chatroom", chat_type="group",
-            sender_id="wxid_peer1"))
-        ch._dispatch_event(_event(
-            id="g:2", chat_id="111@chatroom", chat_type="group",
-            sender_id="wxid_peer2"))
+        ch._dispatch_event(_event(id="g:1", chat_id="222@chatroom", chat_type="group", sender_id="wxid_peer1"))
+        ch._dispatch_event(_event(id="g:2", chat_id="111@chatroom", chat_type="group", sender_id="wxid_peer2"))
         ch._dispatch_event(_event(id="d:1"))  # DM 不受白名单影响
         assert [e["id"] for e in enqueued] == ["g:2", "d:1"]
 
@@ -391,14 +388,11 @@ class TestWechatAutoChannel:
         ch = _make_channel()
         enqueued: list[dict] = []
         ch._enqueue_callback = enqueued.append
-        ch._dispatch_event(_event(
-            id="g:1", chat_id="222@chatroom", chat_type="group",
-            sender_id="wxid_peer1"))
+        ch._dispatch_event(_event(id="g:1", chat_id="222@chatroom", chat_type="group", sender_id="wxid_peer1"))
         assert [e["id"] for e in enqueued] == ["g:1"]
 
     def test_group_allow_from_dict(self) -> None:
-        cfg = WechatAutoConfig.from_dict(
-            {"token": "t", "group_allow": ["111@chatroom"]})
+        cfg = WechatAutoConfig.from_dict({"token": "t", "group_allow": ["111@chatroom"]})
         assert cfg.group_allow == ["111@chatroom"]
 
     def test_session_id_fallback(self) -> None:
@@ -418,7 +412,10 @@ class TestWechatAutoOutbound:
         method, url, kwargs = session.calls[0]
         assert method == "POST"
         assert url.endswith("/send")
-        assert kwargs["json"] == {"to": "wxid_peer1", "text": "hi there", "verify": False}
+        assert kwargs["json"]["to"] == "wxid_peer1"
+        assert kwargs["json"]["text"] == "hi there"
+        assert kwargs["json"]["verify"] is False
+        assert kwargs["json"]["client_msg_id"].startswith("wca-")
         assert kwargs["headers"]["Authorization"] == "Bearer test_token"
 
     @pytest.mark.asyncio
@@ -438,6 +435,54 @@ class TestWechatAutoOutbound:
         subject = ChannelSubject(subject_id="wxid_peer1", metadata={})
         with pytest.raises(BridgeAPIError):
             await ch._send_text(subject, "x")
+
+    @pytest.mark.asyncio
+    async def test_send_text_retries_once_on_transport_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Transport failure (no bridge response) retries once with the SAME
+        client_msg_id so the bridge can dedup an ambiguous first attempt."""
+        monkeypatch.setattr(wca_channel, "_SEND_RETRY_DELAY_S", 0.01)
+        calls: list[dict] = []
+
+        class _FlakyApi:
+            async def send_text(self, **kw):
+                calls.append(kw)
+                if len(calls) == 1:
+                    raise aiohttp.ClientConnectionError("connection refused")
+                return {"ok": True}
+
+        ch = _make_channel()
+
+        async def _api():
+            return _FlakyApi()
+
+        ch._api = _api  # type: ignore[method-assign]
+        subject = ChannelSubject(subject_id="wxid_peer1", metadata={"chat_id": "wxid_peer1"})
+        await ch._send_text(subject, "hello")
+        assert len(calls) == 2
+        assert calls[0]["client_msg_id"] == calls[1]["client_msg_id"]
+
+    @pytest.mark.asyncio
+    async def test_send_text_no_retry_on_http_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """502 (bridge alive, send failed) must NOT retry — chunked sends could
+        be half-delivered; a replay would duplicate chunks."""
+        monkeypatch.setattr(wca_channel, "_SEND_RETRY_DELAY_S", 0.01)
+        calls: list[dict] = []
+
+        class _FailApi:
+            async def send_text(self, **kw):
+                calls.append(kw)
+                raise BridgeAPIError("send failed", status=502)
+
+        ch = _make_channel()
+
+        async def _api():
+            return _FailApi()
+
+        ch._api = _api  # type: ignore[method-assign]
+        subject = ChannelSubject(subject_id="wxid_peer1", metadata={})
+        with pytest.raises(BridgeAPIError):
+            await ch._send_text(subject, "x")
+        assert len(calls) == 1
 
     @pytest.mark.asyncio
     async def test_send_media_writes_temp_file(self, tmp_path) -> None:
