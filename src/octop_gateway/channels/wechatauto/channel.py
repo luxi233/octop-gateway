@@ -280,6 +280,8 @@ class WechatAutoChannel(BaseChannel):
             raw = raw[1:]
         return raw if os.path.isfile(raw) else None
 
+    # Note: original filename must survive staging (bridge labels by basename) —
+    # see .agents/notes/implemented/bug-fix/2026-10-13-outbound-media-filename.md
     async def _deliver_media(self, subject: ChannelSubject, media: ContentPart) -> bool:
         to = self._send_target(subject)
         tmp_path = ""
