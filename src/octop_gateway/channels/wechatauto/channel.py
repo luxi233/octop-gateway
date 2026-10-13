@@ -26,6 +26,7 @@ import shlex
 import subprocess
 import tempfile
 import time
+import urllib.parse
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -266,29 +267,52 @@ class WechatAutoChannel(BaseChannel):
         if not sent:
             await self._send_media_fallback(subject, media)
 
+    @staticmethod
+    def _local_media_path(media: ContentPart) -> str | None:
+        """file:// URL -> real local path. Passthrough skips the byte
+        copy and keeps the original filename (a mkstemp random name
+        shows up to the recipient as wca_out_xxx)."""
+        url = media.url if isinstance(media, ImageContent | VideoContent | AudioContent | FileContent) else ""
+        if not url or not url.startswith("file://"):
+            return None
+        raw = urllib.parse.unquote(urllib.parse.urlparse(url).path)
+        if re.match(r"^/[A-Za-z]:[/\\]", raw):  # RFC 8089: /C:/... on Windows
+            raw = raw[1:]
+        return raw if os.path.isfile(raw) else None
+
     async def _deliver_media(self, subject: ChannelSubject, media: ContentPart) -> bool:
         to = self._send_target(subject)
-        try:
-            data, mime = await self.load_media_bytes(media)
-        except Exception:  # pylint: disable=broad-except
-            logger.exception("WechatAutoChannel failed to load outbound media")
-            return False
-        if not data:
-            return False
-
-        ext = Path(media.filename).suffix if isinstance(media, FileContent) and media.filename else ""
-        if not ext:
-            ext = mimetypes.guess_extension(mime or "") or ".bin"
         tmp_path = ""
+        tmp_dir = ""
+        send_path = self._local_media_path(media)
+        if send_path is None:
+            try:
+                data, mime = await self.load_media_bytes(media)
+            except Exception:  # pylint: disable=broad-except
+                logger.exception("WechatAutoChannel failed to load outbound media")
+                return False
+            if not data:
+                return False
+            fname = media.filename if isinstance(media, FileContent) else ""
+            fname = os.path.basename(fname.replace("\\", "/")) if fname else ""
+            if fname in ("", ".", ".."):
+                ext = mimetypes.guess_extension(mime or "") or ".bin"
+                fname = f"file{ext}"
+            tmp_dir = tempfile.mkdtemp(prefix="wca_out_")
+            tmp_path = os.path.join(tmp_dir, fname)
+            try:
+                with open(tmp_path, "wb") as f:
+                    f.write(data)
+            except Exception:  # pylint: disable=broad-except
+                logger.exception("WechatAutoChannel media staging error")
+                return False
+            send_path = tmp_path
         try:
-            fd, tmp_path = tempfile.mkstemp(prefix="wca_out_", suffix=ext)
-            with os.fdopen(fd, "wb") as f:
-                f.write(data)
             api = await self._api()
             mid = f"wca-{self._channel_id}-{uuid.uuid4().hex[:12]}"
             kwargs: dict[str, Any] = dict(
                 to=to,
-                path=tmp_path,
+                path=send_path,
                 image=isinstance(media, ImageContent),
                 verify=self._config.verify_send,
                 client_msg_id=mid,
@@ -312,6 +336,9 @@ class WechatAutoChannel(BaseChannel):
             if tmp_path:
                 with contextlib.suppress(OSError):
                     os.unlink(tmp_path)
+            if tmp_dir:
+                with contextlib.suppress(OSError):
+                    os.rmdir(tmp_dir)
 
     async def _send_media_fallback(self, subject: ChannelSubject, media: ContentPart) -> None:
         url = self._get_media_url(media)

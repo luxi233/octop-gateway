@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+from pathlib import Path
 
 import aiohttp
 import pytest
@@ -512,6 +513,44 @@ class TestWechatAutoOutbound:
         await ch._send_media(subject, media)
         assert session.calls[1][2]["json"]["to"] == "wxid_peer1"
         assert "File" in session.calls[1][2]["json"]["text"]
+
+    @pytest.mark.asyncio
+    async def test_send_media_file_url_passthrough_keeps_name(self, tmp_path) -> None:
+        """file:// media goes straight to the bridge without the byte copy —
+        the recipient sees the real filename, not a wca_out_ temp name."""
+        real = tmp_path / "M2说明书.pdf"
+        real.write_bytes(b"pdf-bytes")
+        session = _FakeSession([_FakeResponse(200, {"ok": True})])
+        ch = _make_channel()
+        ch._http = session
+        media = FileContent(url=real.resolve().as_uri(), filename="M2说明书.pdf")
+        subject = ChannelSubject(subject_id="wxid_peer1", metadata={})
+        await ch._send_media(subject, media)
+        sent_path = session.calls[0][2]["json"]["path"]
+        assert Path(sent_path).name == "M2说明书.pdf"
+        assert "wca_out_" not in sent_path
+
+    @pytest.mark.asyncio
+    async def test_send_media_data_stages_with_real_filename(self, tmp_path) -> None:
+        """Byte-sourced media still stages a temp file, but named with the
+        original filename so the recipient sees it."""
+        session = _FakeSession([_FakeResponse(200, {"ok": True})])
+        ch = _make_channel()
+        ch._http = session
+        media = FileContent(data=base64.b64encode(b"pdf").decode(), filename="报表.xlsx")
+        subject = ChannelSubject(subject_id="wxid_peer1", metadata={})
+        await ch._send_media(subject, media)
+        sent_path = session.calls[0][2]["json"]["path"]
+        assert Path(sent_path).name == "报表.xlsx"
+        assert Path(sent_path).parent.name.startswith("wca_out_")
+        # staged file + dir cleaned up after send
+        assert not Path(sent_path).exists()
+        assert not Path(sent_path).parent.exists()
+
+    def test_local_media_path_rejects_virtual_urls(self) -> None:
+        assert WechatAutoChannel._local_media_path(FileContent(url="wca-media://chat/1", filename="a.pdf")) is None
+        assert WechatAutoChannel._local_media_path(FileContent(url="https://x/y.pdf", filename="a.pdf")) is None
+        assert WechatAutoChannel._local_media_path(FileContent(filename="a.pdf")) is None
 
 
 class TestWechatAutoInboundMedia:
