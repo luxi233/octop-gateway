@@ -25,8 +25,13 @@ Two send paths in `WechatAutoChannel._deliver_media`:
    is random; the basename is the original — that is the part the
    recipient sees. Sanitizing is basename-only plus a `.`/`..` guard.
 
-Cleanup removes both the staged file and its directory in `finally`;
-send failure still degrades to the text-marker fallback.
+Staging lives under a persistent outbox (`~/.wechatauto/outbox/`), not
+`%TEMP%`, and is **not** deleted when the send returns. WeChat 4.x keeps
+reading the source file asynchronously after Enter; the first version
+deleted it in `finally` and recipients got a file card stuck on
+"发送中断" (upload aborted — source gone). `_sweep_outbox` removes
+`wca_out_*` entries older than `_OUTBOX_TTL_S` (2h) lazily on the next
+send; send failure still degrades to the text-marker fallback.
 
 ## Alternatives considered
 
@@ -48,9 +53,10 @@ send failure still degrades to the text-marker fallback.
 - Recipient sees the declared/original basename; WeChat no longer leaks
   `wca_out_*` internals.
 - `file://` sends skip the bytes copy entirely; data-backed sends pay
-  one extra directory create/remove per file — negligible.
+  one extra directory create per file plus a lazy outbox sweep —
+  negligible.
 - Filenames are sanitized to basename only; a filename that is `.`/`..`
   or empty falls back to `file.<ext>`.
-- The temp dir cleanup is suppressed-best-effort (`os.rmdir` guarded) —
-  a bridge still holding the file handle on Windows leaves an empty dir
-  behind, which temp cleaning reaps later; this matches prior behavior.
+- Staged files persist up to 2h in `~/.wechatauto/outbox/` so WeChat's
+  async upload can finish; sweep is lazy (per-send) and prefix-scoped,
+  so a dead channel leaks bounded disk instead of aborting transfers.

@@ -23,6 +23,7 @@ import mimetypes
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import tempfile
 import time
@@ -80,6 +81,11 @@ _SPAWN_COOLDOWN_S = 60.0
 # supervisor respawn window (spawn + startup check ≈ 4-6s) and well inside
 # the bridge's 600s dedup TTL.
 _SEND_RETRY_DELAY_S = 8.0
+
+# Outbound staging lives in a persistent outbox and is swept lazily, never
+# right after send: WeChat keeps reading the source file asynchronously
+# after Enter, and deleting it early aborts the transfer ("发送中断").
+_OUTBOX_TTL_S = 2 * 3600
 
 
 @dataclass
@@ -300,7 +306,7 @@ class WechatAutoChannel(BaseChannel):
             if fname in ("", ".", ".."):
                 ext = mimetypes.guess_extension(mime or "") or ".bin"
                 fname = f"file{ext}"
-            tmp_dir = tempfile.mkdtemp(prefix="wca_out_")
+            tmp_dir = tempfile.mkdtemp(prefix="wca_out_", dir=self._outbox_dir())
             tmp_path = os.path.join(tmp_dir, fname)
             try:
                 with open(tmp_path, "wb") as f:
@@ -335,12 +341,30 @@ class WechatAutoChannel(BaseChannel):
             logger.exception("WechatAutoChannel media send error")
             return False
         finally:
-            if tmp_path:
-                with contextlib.suppress(OSError):
-                    os.unlink(tmp_path)
             if tmp_dir:
-                with contextlib.suppress(OSError):
-                    os.rmdir(tmp_dir)
+                self._sweep_outbox()
+
+    def _outbox_dir(self) -> str:
+        path = os.path.join(os.path.expanduser("~"), ".wechatauto", "outbox")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def _sweep_outbox(self) -> None:
+        outbox = self._outbox_dir()
+        try:
+            entries = os.listdir(outbox)
+        except OSError:
+            return
+        cutoff = time.time() - _OUTBOX_TTL_S
+        for name in entries:
+            if not name.startswith("wca_out_"):
+                continue
+            path = os.path.join(outbox, name)
+            try:
+                if os.path.getmtime(path) < cutoff:
+                    shutil.rmtree(path, ignore_errors=True)
+            except OSError:
+                continue
 
     async def _send_media_fallback(self, subject: ChannelSubject, media: ContentPart) -> None:
         url = self._get_media_url(media)

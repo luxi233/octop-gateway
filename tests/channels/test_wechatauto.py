@@ -15,6 +15,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
+import time
 from pathlib import Path
 
 import aiohttp
@@ -531,21 +533,52 @@ class TestWechatAutoOutbound:
         assert "wca_out_" not in sent_path
 
     @pytest.mark.asyncio
-    async def test_send_media_data_stages_with_real_filename(self, tmp_path) -> None:
+    async def test_send_media_data_stages_with_real_filename(self, tmp_path, monkeypatch) -> None:
         """Byte-sourced media still stages a temp file, but named with the
         original filename so the recipient sees it."""
+        outbox = tmp_path / "outbox"
+        outbox.mkdir()
         session = _FakeSession([_FakeResponse(200, {"ok": True})])
         ch = _make_channel()
         ch._http = session
+        monkeypatch.setattr(ch, "_outbox_dir", lambda: str(outbox))
         media = FileContent(data=base64.b64encode(b"pdf").decode(), filename="报表.xlsx")
         subject = ChannelSubject(subject_id="wxid_peer1", metadata={})
         await ch._send_media(subject, media)
         sent_path = session.calls[0][2]["json"]["path"]
         assert Path(sent_path).name == "报表.xlsx"
         assert Path(sent_path).parent.name.startswith("wca_out_")
-        # staged file + dir cleaned up after send
-        assert not Path(sent_path).exists()
-        assert not Path(sent_path).parent.exists()
+        # Staging survives the send: WeChat reads the source file
+        # asynchronously after Enter — deleting it early aborts the
+        # upload and shows "发送中断" to the recipient.
+        assert Path(sent_path).exists()
+        assert Path(sent_path).parent.exists()
+
+    @pytest.mark.asyncio
+    async def test_send_media_sweeps_stale_outbox_entries(self, tmp_path, monkeypatch) -> None:
+        """Sweep removes only entries older than the TTL; the file just sent
+        and fresh entries stay put for WeChat's async upload."""
+        outbox = tmp_path / "outbox"
+        outbox.mkdir()
+        stale = outbox / "wca_out_stale"
+        stale.mkdir()
+        (stale / "old.pdf").write_bytes(b"old")
+        fresh = outbox / "wca_out_fresh"
+        fresh.mkdir()
+        (fresh / "new.pdf").write_bytes(b"new")
+        stale_ts = time.time() - (wca_channel._OUTBOX_TTL_S + 60)
+        os.utime(stale, (stale_ts, stale_ts))
+        session = _FakeSession([_FakeResponse(200, {"ok": True})])
+        ch = _make_channel()
+        ch._http = session
+        monkeypatch.setattr(ch, "_outbox_dir", lambda: str(outbox))
+        media = FileContent(data=base64.b64encode(b"pdf").decode(), filename="a.pdf")
+        subject = ChannelSubject(subject_id="wxid_peer1", metadata={})
+        await ch._send_media(subject, media)
+        sent_path = session.calls[0][2]["json"]["path"]
+        assert not stale.exists()
+        assert fresh.exists()
+        assert Path(sent_path).exists()
 
     def test_local_media_path_rejects_virtual_urls(self) -> None:
         assert WechatAutoChannel._local_media_path(FileContent(url="wca-media://chat/1", filename="a.pdf")) is None
