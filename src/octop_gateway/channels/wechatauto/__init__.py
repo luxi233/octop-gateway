@@ -9,3 +9,14 @@ __all__ = [
     "WechatAutoChannel",
     "WechatAutoConfig",
 ]
+
+# Vendored harness patches: self-apply when the channel package is loaded
+# (idempotent); any failure must never block channel import.
+try:
+    from octop_gateway.channels.wechatauto._harness_patches import (
+        apply as _apply_harness_patches,
+    )
+
+    _apply_harness_patches()
+except Exception:
+    pass
